@@ -21,9 +21,10 @@ dotenv load and sets a placeholder key -- it is never used to make a call.
 
 import asyncio
 import importlib
+from unittest.mock import AsyncMock
 
 import pytest
-
+from fastmcp import Client
 from mistralai.search.toolkit.document import ChunkType
 from mistralai.search.toolkit.search import NavigationDirection
 from mistralai.search.toolkit.search.models import SearchResult, SearchResultChunk
@@ -156,3 +157,83 @@ def test_open_raises_when_the_chunk_id_is_unknown(mcp_server, monkeypatch: pytes
 
     with pytest.raises(ToolError):
         asyncio.run(_open_fn(mcp_server)("does-not-exist"))
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("search", {"query": "q", "top_k": 0}),
+        ("search", {"query": "q", "top_k": -1}),
+        ("open", {"chunk_id": "c2", "window": -1}),
+        ("navigate", {"source_id": "doc-1", "start_offset": -1, "end_offset": 20, "direction": "next"}),
+        ("navigate", {"source_id": "doc-1", "start_offset": 0, "end_offset": -1, "direction": "next"}),
+        ("navigate", {"source_id": "doc-1", "start_offset": 0, "end_offset": 20, "direction": "sideways"}),
+        ("navigate", {"source_id": "doc-1", "start_offset": 0, "end_offset": 20, "direction": "next", "top_k": 0}),
+        ("read", {"source_id": "doc-1", "start_offset": -1}),
+        ("read", {"source_id": "doc-1", "end_offset": -1}),
+        ("read", {"source_id": "doc-1", "top_k": 0}),
+        ("grep", {"source_id": "doc-1", "pattern": "word", "mode": "regex"}),
+        ("grep", {"source_id": "doc-1", "pattern": "word", "top_k": 0}),
+    ],
+)
+def test_invalid_tool_arguments_do_not_reach_the_backend(
+    mcp_server, monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict
+) -> None:
+    engine = AsyncMock()
+    store = AsyncMock()
+    monkeypatch.setattr(mcp_server, "_query_engine", engine)
+    monkeypatch.setattr(mcp_server, "_navigable_store", store)
+
+    async def call_tool():
+        async with Client(mcp_server.mcp) as client:
+            return await client.call_tool(tool, arguments, raise_on_error=False)
+
+    result = asyncio.run(call_tool())
+
+    assert result.is_error
+    engine.search.assert_not_awaited()
+    for method in ("get_chunk", "navigate", "read", "grep"):
+        getattr(store, method).assert_not_awaited()
+
+
+def test_open_with_zero_window_returns_only_the_anchor(mcp_server, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = AsyncMock()
+    store.get_chunk.return_value = _result("c2", 10, 20, "anchor")
+    store.navigate.side_effect = AssertionError("a zero window must not request neighbours")
+    monkeypatch.setattr(mcp_server, "_navigable_store", store)
+
+    async def call_tool():
+        async with Client(mcp_server.mcp) as client:
+            return await client.call_tool("open", {"chunk_id": "c2", "window": 0})
+
+    result = asyncio.run(call_tool())
+
+    assert [chunk["id"] for chunk in result.data] == ["c2"]
+    store.get_chunk.assert_awaited_once_with("c2")
+    store.navigate.assert_not_awaited()
+
+
+def test_tool_schemas_advertise_limits_and_supported_options(mcp_server) -> None:
+    navigate_tool = asyncio.run(mcp_server.mcp.get_tool("navigate"))
+    grep_tool = asyncio.run(mcp_server.mcp.get_tool("grep"))
+    open_tool = asyncio.run(mcp_server.mcp.get_tool("open"))
+
+    assert navigate_tool.parameters["$defs"]["NavigationDirection"]["enum"] == ["next", "previous"]
+    assert grep_tool.parameters["$defs"]["GrepMode"]["enum"] == ["phrase", "term"]
+    assert navigate_tool.parameters["properties"]["top_k"]["minimum"] == 1
+    assert open_tool.parameters["properties"]["window"]["minimum"] == 0
+
+
+def test_read_accepts_unbounded_offsets(mcp_server, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = AsyncMock()
+    store.read.return_value = [_result("c1", 0, 10, "hit")]
+    monkeypatch.setattr(mcp_server, "_navigable_store", store)
+
+    async def call_tool():
+        async with Client(mcp_server.mcp) as client:
+            return await client.call_tool("read", {"source_id": "doc-1", "start_offset": None, "end_offset": None})
+
+    result = asyncio.run(call_tool())
+
+    assert [chunk["id"] for chunk in result.data] == ["c1"]
+    store.read.assert_awaited_once_with("doc-1", None, None, top_k=20)

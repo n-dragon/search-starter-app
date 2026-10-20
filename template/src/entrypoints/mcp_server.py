@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -10,8 +11,8 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mistralai.client import Mistral
-from mistralai.search.toolkit.embedders import MistralEmbedder
 from mistralai.search.toolkit.document import compute_id
+from mistralai.search.toolkit.embedders import MistralEmbedder
 from mistralai.search.toolkit.ingestion import File
 from mistralai.search.toolkit.ingestion.extractors import (
     MistralOCRExtractor,
@@ -24,8 +25,13 @@ from mistralai.search.toolkit.ingestion.text_splitters import (
     MarkdownTextSplitterConfig,
 )
 from mistralai.search.toolkit.retrieval import QueryEngine, VectorRetriever
-from mistralai.search.toolkit.search import GrepMode, NavigableIndex, NavigationDirection
+from mistralai.search.toolkit.search import (
+    GrepMode,
+    NavigableIndex,
+    NavigationDirection,
+)
 from mistralai.search.toolkit.search.errors import DocumentNotFoundError
+from pydantic import Field
 from search_app import get_index
 
 load_dotenv(override=True)
@@ -124,7 +130,7 @@ def _format_chunks(results: list) -> list[dict]:
 
 @mcp.tool()
 async def search(
-    query: str, top_k: int = 5, exclude_ids: list[str] | None = None
+    query: str, top_k: Annotated[int, Field(ge=1)] = 5, exclude_ids: list[str] | None = None
 ) -> list[dict]:
     """Search the document collection and return the most relevant chunks.
 
@@ -254,7 +260,7 @@ async def delete(source_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def open(chunk_id: str, window: int = 2) -> list[dict]:
+async def open(chunk_id: str, window: Annotated[int, Field(ge=0)] = 2) -> list[dict]:
     """Expand context around a chunk from search: return it plus adjacent chunks in reading order.
 
     Pass the `id` of a chunk from a search() result; the server resolves its
@@ -264,11 +270,14 @@ async def open(chunk_id: str, window: int = 2) -> list[dict]:
 
     Args:
         chunk_id: `id` of a chunk from a search() result.
-        window:   Number of adjacent chunks to fetch in each direction (default 2).
+        window:   Number of adjacent chunks to fetch in each direction (default 2);
+                  zero returns only the anchor chunk.
     """
     anchor = await _navigable_store.get_chunk(chunk_id)
     if anchor is None:
         raise ToolError(f"chunk not found: {chunk_id!r}")
+    if window == 0:
+        return _format_chunks([anchor])
     source_id = anchor.chunk.source_id
     start_offset = anchor.chunk.start_offset or 0
     end_offset = anchor.chunk.end_offset or 0
@@ -284,10 +293,10 @@ async def open(chunk_id: str, window: int = 2) -> list[dict]:
 @mcp.tool()
 async def navigate(
     source_id: str,
-    start_offset: int,
-    end_offset: int,
-    direction: str,
-    top_k: int = 1,
+    start_offset: Annotated[int, Field(ge=0)],
+    end_offset: Annotated[int, Field(ge=0)],
+    direction: NavigationDirection,
+    top_k: Annotated[int, Field(ge=1)] = 1,
 ) -> list[dict]:
     """Step forward or backward through a document from a known position.
 
@@ -308,9 +317,9 @@ async def navigate(
 @mcp.tool()
 async def read(
     source_id: str,
-    start_offset: int | None = None,
-    end_offset: int | None = None,
-    top_k: int = 20,
+    start_offset: Annotated[int | None, Field(ge=0)] = None,
+    end_offset: Annotated[int | None, Field(ge=0)] = None,
+    top_k: Annotated[int, Field(ge=1)] = 20,
 ) -> list[dict]:
     """Fetch chunks from a known offset range: direct access, no context expansion.
 
@@ -333,8 +342,8 @@ async def read(
 async def grep(
     source_id: str,
     pattern: str,
-    mode: str = "phrase",
-    top_k: int = 5,
+    mode: GrepMode = GrepMode.PHRASE,
+    top_k: Annotated[int, Field(ge=1)] = 5,
 ) -> list[dict]:
     """Lexical search for an exact term or phrase within a single document.
 

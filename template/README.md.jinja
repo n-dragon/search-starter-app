@@ -112,6 +112,12 @@ The server fails fast at startup with a clear error if `MISTRAL_API_KEY` is miss
 | `read(source_id, start_offset=None, end_offset=None, top_k=20)` | Fetch a known offset range directly, no context expansion; omit either bound to read from the start or to the end |
 | `grep(source_id, pattern, mode="phrase", top_k=5)` | Lexical search within a single source; `mode` is `"phrase"` (ordered) or `"term"` (any order) |
 
+The MCP tool schemas expose these constraints: `top_k` must be at least 1, and
+offsets and `window` must be non-negative. `open(chunk_id, window=0)` returns only
+the anchor chunk. Invalid arguments are rejected before any search or navigation
+call reaches the backend. The schemas also list the supported `direction` and
+`mode` values so agents can choose valid options.
+
 ### Vibe CLI
 
 Run `vibe` from this project directory. It automatically reads `.vibe/config.toml` and connects to the server via stdio — no manual setup needed. You can immediately ask Vibe to search or ingest documents.
